@@ -145,36 +145,68 @@
     const statusText = document.getElementById('status');
 
     let samples = [];
+    let timestamps = [];
+    let stream = null;
+    let track = null;
     let detecting = false;
 
     async function startDetection() {
       try {
         statusText.innerText = 'Accessing camera...';
 
-        const stream = await navigator.mediaDevices.getUserMedia({
+        stream = await navigator.mediaDevices.getUserMedia({
           video: {
-            facingMode: 'environment'
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 640 },
+            height: { ideal: 480 }
           },
           audio: false
         });
 
         video.srcObject = stream;
+        track = stream.getVideoTracks()[0];
 
-        detecting = true;
+        await enableTorch();
+
         samples = [];
+        timestamps = [];
+        detecting = true;
 
-        statusText.innerText = 'Place finger on camera...';
+        statusText.innerText = 'Place finger fully on camera and flash...';
 
-        setTimeout(processFrame, 2000);
+        setTimeout(() => {
+          requestAnimationFrame(processFrame);
+        }, 2000);
 
       } catch (err) {
         console.error(err);
-        statusText.innerText = 'Camera access denied or unsupported.';
+        statusText.innerText = 'Camera or flash not supported on this device.';
+      }
+    }
+
+    async function enableTorch() {
+      try {
+        const capabilities = track.getCapabilities();
+
+        if (capabilities.torch) {
+          await track.applyConstraints({
+            advanced: [{ torch: true }]
+          });
+
+          statusText.innerText = 'Flashlight enabled.';
+        }
+      } catch (e) {
+        console.log('Torch not available');
       }
     }
 
     function processFrame() {
       if (!detecting) return;
+
+      if (video.videoWidth === 0) {
+        requestAnimationFrame(processFrame);
+        return;
+      }
 
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
@@ -184,21 +216,35 @@
       const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const data = frame.data;
 
-      let redSum = 0;
+      let red = 0;
+      let green = 0;
+      let blue = 0;
 
       for (let i = 0; i < data.length; i += 4) {
-        redSum += data[i];
+        red += data[i];
+        green += data[i + 1];
+        blue += data[i + 2];
       }
 
-      const avgRed = redSum / (data.length / 4);
+      const pixels = data.length / 4;
+      red /= pixels;
+      green /= pixels;
+      blue /= pixels;
 
-      samples.push({
-        value: avgRed,
-        time: Date.now()
-      });
+      const intensity = red - (green + blue) / 2;
 
-      if (samples.length > 300) {
+      if (red < 80) {
+        statusText.innerText = 'Cover camera fully with finger.';
+        requestAnimationFrame(processFrame);
+        return;
+      }
+
+      samples.push(intensity);
+      timestamps.push(Date.now());
+
+      if (samples.length > 250) {
         samples.shift();
+        timestamps.shift();
       }
 
       calculateBPM();
@@ -207,28 +253,51 @@
     }
 
     function calculateBPM() {
-      if (samples.length < 60) return;
+      if (samples.length < 100) return;
 
-      let peaks = 0;
+      const smoothed = [];
 
-      for (let i = 1; i < samples.length - 1; i++) {
+      for (let i = 2; i < samples.length - 2; i++) {
+        const avg = (
+          samples[i - 2] +
+          samples[i - 1] +
+          samples[i] +
+          samples[i + 1] +
+          samples[i + 2]
+        ) / 5;
+
+        smoothed.push(avg);
+      }
+
+      let peaks = [];
+
+      for (let i = 1; i < smoothed.length - 1; i++) {
         if (
-          samples[i].value > samples[i - 1].value &&
-          samples[i].value > samples[i + 1].value &&
-          samples[i].value > 150
+          smoothed[i] > smoothed[i - 1] &&
+          smoothed[i] > smoothed[i + 1] &&
+          smoothed[i] > 5
         ) {
-          peaks++;
+          peaks.push(i);
         }
       }
 
-      const duration =
-        (samples[samples.length - 1].time - samples[0].time) / 1000;
+      if (peaks.length < 2) return;
 
-      const bpm = Math.round((peaks / duration) * 60);
+      let intervals = [];
 
-      if (bpm > 40 && bpm < 180) {
+      for (let i = 1; i < peaks.length; i++) {
+        const t1 = timestamps[peaks[i - 1]];
+        const t2 = timestamps[peaks[i]];
+        intervals.push(t2 - t1);
+      }
+
+      const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+
+      const bpm = Math.round(60000 / avgInterval);
+
+      if (bpm >= 45 && bpm <= 160) {
         bpmDisplay.innerText = bpm + ' BPM';
-        statusText.innerText = 'Heart rate detected successfully!';
+        statusText.innerText = 'Heart rate detected successfully';
       }
     }
   </script>
